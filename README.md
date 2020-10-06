@@ -6,14 +6,14 @@
 * Inverted Pendulum
   * Pendulum-v0 environment, solved using A3C 
   
-*KungFuMaster game
+* KungFuMaster game
   * KungFuMasterDeterministic environment, solved using A3C 
   * CNN + LSTM approach
   
-*LunarLander
+* LunarLander
   * LunarLander-v2 environment, solved using A3C with Generalized Advantage Estimation (GAE)
   * CNN + LSTM
   
-*MountainCar
+* MountainCar
   * MountainCar-v0 environment, solved using A3C
   * CNN + LSTM
