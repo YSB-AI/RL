@@ -1,7 +1,7 @@
 # Reinforcement Learning challenges
 
 * Breakout game
-  * Breakout-v4 deterministic environment, solved using Deep Q-Network (DQN)
+  * Breakout-v4 deterministic environment, using Deep Q-Network (DQN) - Still in progress 
   * Code + Video available
   
 * Inverted Pendulum
