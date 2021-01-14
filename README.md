@@ -6,6 +6,7 @@
   
 * Inverted Pendulum
   * Pendulum-v0 environment, solved using A3C 
+  * Pendulum-v0 environment, solved using A3C + Average Reward for continuing task
   * Code + Video available
   
 * KungFuMaster game
@@ -22,3 +23,11 @@
   * MountainCar-v0 environment, solved using A3C
   * CNN + LSTM
   * Code + Video available
+  
+* Mujoco Environments 
+  * Ant-v2, solved using Soft Actor Critic
+    * Code available
+  * HalfCheetah-v2, solved using Soft Actor Critic
+    * Code available
+
+
