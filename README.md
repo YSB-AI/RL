@@ -29,6 +29,7 @@
 ## Mujoco Environments 
   * Ant-v2, solved using Soft Actor Critic
     * Code available
+    
   * HalfCheetah-v2, solved using Soft Actor Critic
     * Code available
 
