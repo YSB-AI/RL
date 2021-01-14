@@ -1,6 +1,6 @@
-## Reinforcement Learning challenges
+# Reinforcement Learning challenges
 
-# Atari
+## Atari
   * Breakout game
     * Breakout-v4 deterministic environment, using Deep Q-Network (DQN) - **Still in progress**
     * Code + Video available
@@ -15,7 +15,7 @@
     * CNN + LSTM approach
     * Code + Video available
   
-# Classic Control 
+## Classic Control 
   * Inverted Pendulum
     * Pendulum-v0 environment, solved using A3C 
     * Pendulum-v0 environment, solved using A3C + Average Reward for continuing task
@@ -26,7 +26,7 @@
     * CNN + LSTM
     * Code + Video available
 
-# Mujoco Environments 
+## Mujoco Environments 
   * Ant-v2, solved using Soft Actor Critic
     * Code available
   * HalfCheetah-v2, solved using Soft Actor Critic
