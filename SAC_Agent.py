@@ -279,8 +279,8 @@ class SAC(tf.keras.Model):
             actions = self.sample_action(obs, save_action = True, epoch=epoch)
 
 
-        new_obs, rewards, terminated, truncated , info  = self.train_env.step(actions)
-        done = truncated or terminated 
+        new_obs, rewards, done, info  = self.train_env.step(actions)
+        #done = truncated or terminated 
         
         self.memory.append([obs, actions, new_obs, rewards/self.reward_scaler, done])
         self.total_rewards = self.total_rewards + rewards
@@ -295,7 +295,7 @@ class SAC(tf.keras.Model):
 
         obs = new_obs
         if done and epoch >0  :
-            obs = self.train_env.reset()[0]
+            obs = self.train_env.reset()#[0]
             self.rewards_train_history.append(self.total_rewards)
         
             with self.tb_summary_writer.as_default():
@@ -308,16 +308,16 @@ class SAC(tf.keras.Model):
     def evaluate(self, eval_env, n_tries=1, hyp= False):
         rewards_history = []
         for _ in range(n_tries):
-            obs = eval_env.reset()[0]
+            obs = eval_env.reset()#[0]
             total_reward = 0
             while(True):
             
                 actions= self.sample_action(obs)
-                obs, reward, terminated, truncated , info = eval_env.step(actions)
+                obs, reward, done , info = eval_env.step(actions)
                 reward = reward
                 total_reward += reward
 
-                done = truncated or terminated 
+                #done = truncated or terminated 
                 if done:
                     break
 
@@ -551,7 +551,7 @@ class MyHyperModel(kt.HyperModel):
         for callback in callbacks:
             callback.model = model
 
-        obs = model.train_env.reset()[0]
+        obs = model.train_env.reset()#[0]
         model.update_weights(True)
 
         for epoch in range(training_steps):
@@ -582,27 +582,28 @@ class MyHyperModel(kt.HyperModel):
 def run_training(training_steps,   discount,  dense_units_act,  dense_units_crit,num_layer_a,num_layer_c,
                   writer, end_of_episode, save_factor=50000, sucess_criteria_epochs =100, sucess_criteria_value = -100, 
                  environment_name="MountainCar-v0", reward_scaler = 1, evaluation_epoch = 2000,return_agent = False,lr_actor= 0.001, lr_critic_1= 0.001, lr_alpha = 0.001,
-                   tau = 0.001, alpha =  0.2, train_epochs = 20, model_path = './checkpoints/SACagent'):
+                   tau = 0.001, alpha =  0.2, train_epochs = 20, model_path = './checkpoints/SACagent', model = None):
   
 
-    model = SAC(
-            discount = discount, 
-            dense_units_act = dense_units_act,
-            dense_units_crit= dense_units_crit, 
-            num_layer_act  = num_layer_a, 
-            num_layer_crit= num_layer_c,
-            writer = writer,
-            trial_n = get_valid_trials_number(writer),
-            end_of_episode = end_of_episode,
-            evaluation_epoch = evaluation_epoch,
-            environment_name = environment_name,
-            reward_scaler = reward_scaler,
-            lr_actor = lr_actor, lr_critic = lr_critic_1, lr_alpha= lr_alpha, 
-            tau= tau,
-            train_epochs = train_epochs
-            )
+    if model is None:
+        model = SAC(
+                discount = discount, 
+                dense_units_act = dense_units_act,
+                dense_units_crit= dense_units_crit, 
+                num_layer_act  = num_layer_a, 
+                num_layer_crit= num_layer_c,
+                writer = writer,
+                trial_n = get_valid_trials_number(writer),
+                end_of_episode = end_of_episode,
+                evaluation_epoch = evaluation_epoch,
+                environment_name = environment_name,
+                reward_scaler = reward_scaler,
+                lr_actor = lr_actor, lr_critic = lr_critic_1, lr_alpha= lr_alpha, 
+                tau= tau,
+                train_epochs = train_epochs
+                )
     
-    obs = model.train_env.reset()[0]
+    obs = model.train_env.reset()#[0]
     model.update_weights(True)
     with tqdm.trange(training_steps) as t:
         for epoch in t:
@@ -625,7 +626,33 @@ def run_training(training_steps,   discount,  dense_units_act,  dense_units_crit
     if return_agent:
         return model
 
+def rerun_training(training_steps, save_factor = 50000,  model_path = './checkpoints/SACagent',
+                   sucess_criteria_epochs =100, sucess_criteria_value = -100, return_agent = True,model = None):
 
+    
+    obs = model.train_env.reset()#[0]
+    model.update_weights(True)
+    with tqdm.trange(training_steps) as t:
+        for epoch in t:
+            new_obs = model.run_agent(epoch, obs)
+            model.evaluate_agent(epoch)
+
+            obs = new_obs
+            
+            if epoch %save_factor == 0: 
+                model.save_weights(model_path)
+
+            if len(model.rewards_train_history)> 100 :
+                if epoch %  model.evaluation_epoch*50 == 0 :
+                    print(f"Epoch: {epoch} : Reward Train: {np.mean(model.rewards_train_history[-100:])} ")
+
+                if np.mean(model.rewards_val_history[-sucess_criteria_epochs:]) >= sucess_criteria_value:
+                    print("Your agent reached the objetive")
+                    break
+
+    if return_agent:
+        return model
+    
 def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="soft", video_name = "./A3C_soft_video.mp4", sucess_criteria_epochs= 100, reward_scaler = 1, continuous_action_space = False):
     rewards_history = []
     log_dir = "Evaluation_process/A3C_"+str(exploration)+"/" +  datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -635,7 +662,7 @@ def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="soft", video
 
         if k == 0 : video = VideoRecorder(eval_env, path=video_name)
 
-        obs = eval_env.reset()[0]
+        obs = eval_env.reset()#[0]
         total_reward = 0
 
         log_dir_trial = "Evaluation_process/A3C_trial_"+str(exploration)+"/" + str(k)+ datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -647,9 +674,9 @@ def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="soft", video
             if k == 0 : video.capture_frame()
             
             actions= eval_model.sample_action(obs)
-            obs, reward, terminated, truncated , info = eval_env.step(actions)
+            obs, reward, done , info = eval_env.step(actions)
             total_reward += reward
-            done = truncated or terminated 
+            #done = truncated or terminated 
 
             with tb_summary_writer_trial.as_default():
                 tf.summary.scalar('Final_eval_rewards', total_reward, step=int(epoch) )

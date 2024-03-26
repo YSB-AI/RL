@@ -475,7 +475,8 @@ def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="epsilon",  v
         while(True):
     
             if k == 0: video.capture_frame()
-            current_qvalue = eval_model.SARSA_agent(state.reshape((1,len(state))))
+            print(state)
+            current_qvalue = eval_model.SARSA_agent(np.array(state).reshape((1,-1)))
             action,_ = eval_model.sample_actions(current_qvalue,0, 1, exploration="soft", inference= True)
             action = action[0]
             state, reward, terminated, truncated , info = eval_env.step(action)
