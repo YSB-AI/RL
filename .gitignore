@@ -1,1 +1,11 @@
-__pycache__/*
+__pycache__/
+*.__pycache__/
+*.pyc
+Evaluation_process/
+Hyperparam_kt*/
+logs_hyper/
+checkpoints/
+worker*/
+untitled_project/
+ignore.txt
+Training/
