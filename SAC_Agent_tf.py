@@ -1,3 +1,6 @@
+# %load_ext tensorboard
+import datetime
+
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -13,100 +16,48 @@ with warnings.catch_warnings():
 
 #os.environ["TF_CPP_MIN_LOG_LEVEL"]="2"
 
-import tensorflow as tf
-#from tensorflow.python.framework.ops import disable_eager_execution
-
-#disable_eager_execution()
-#tf.config.run_functions_eagerly(False)
 
 import numpy as np
 from datetime import datetime
+import matplotlib.pyplot as plt
 import gym
 from collections import deque
-from tensorflow.keras.layers import Dense
+import tensorflow as tf
+from tensorflow.keras.layers import Dense, LSTM
 from tensorflow.keras.optimizers import Adam
 import random
 import tqdm
 import keras_tuner as kt
-import gc
+import tensorflow_probability as tfp
 
-
-
-#tf.compat.v1.disable_eager_execution()
-#tf.config.run_functions_eagerly(False)
-
-
-# Lazy execution delays evaluation as much as possible. In context of TensorFlow, 
-# it will create a plan of execution (a graph) before it does anything, then when 
-# everything is ready, it will feed the input into the graph and calculate everything
-# to return the output. tf.constant creates an execution node in the graph that will 
-# receive a constant value when the execution starts. You can compare lazy evaluation 
-# to a Rube Goldberg machine: you build the whole thing, then you drop a marble into it 
-# and watch the magic unfold.
-
-# Eager execution evaluates immediately. In context of TensorFlow, it does not createa graph.
-# tf.constant creates a constant, with a certain value, right then and there. 
-# If compared to the Rube Goldberg machine, you could imagine building the first part of the machine, 
-# drop the marble in, then stop it when the marble exits, before building the next 
-# part of the machine, and reintroducing the marble with the same position and velocity.
-
-# TensorFlow is much more efficient in the lazy evaluation mode, but the eager mode is easier to develop and debug on.
-
-seed =0
-np.random.seed(seed)
-tf.random.set_seed(seed) #https://github.com/tensorflow/tensorflow/issues/37252
-tf.keras.utils.set_random_seed(seed)
-
-
-
-#from tensorflow.keras import mixed_precision
-
-# Set the policy to mixed precision
-#policy = mixed_precision.Policy('mixed_float16')
-#mixed_precision.set_global_policy(policy)
-
+tf.config.run_functions_eagerly(True)
 
 import subprocess
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 
-GPU_ONLY = True
-print("Num devices available: ", tf.config.experimental.list_physical_devices())
-if GPU_ONLY:
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-      # Restrict TensorFlow to only use the first GPU
-      try:
-        tf.config.set_visible_devices(gpus[0], 'GPU')
-        logical_gpus = tf.config.list_logical_devices('GPU')
-        print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPU")
-      except RuntimeError as e:
-        # Visible devices must be set before GPUs have been initialized
-        print(e)
-else:
-    print("Num devices available: ", tf.config.experimental.list_physical_devices())
-    tf.config.experimental.set_visible_devices([], 'GPU')
-tf.debugging.set_log_device_placement(False)
 
 class SAC(tf.keras.Model):
     def __init__(self,  discount, dense_units_act, dense_units_crit, tau, num_layer_act, num_layer_crit, writer,  lr_actor, lr_critic, lr_alpha, trial_n = "", end_of_episode = 200, 
-    evaluation_epoch = 2500, environment_name="", reward_scaler  = 1, alpha = 0.2, train_epochs = 50):
+    evaluation_epoch = 2500, environment_name="", reward_scaler  = 1, alpha = 0.2, train_epochs = 20):
         super(SAC, self).__init__()
         # Enviroment parameters
         self.env = gym.make(environment_name)
         self.obs_shape = self.env.observation_space.shape
         self.evaluation_epoch = evaluation_epoch
         self.environment_name= environment_name
-        self.memory = deque(maxlen= 1000000) # WAS 1000000
+        self.memory = deque(maxlen= 1000000)
         self.update_after = 1000
         self.batch_size = 256
         self.update_every = 50
         self.train_epochs= train_epochs
-        self.episode_counter = 0
+        self.epoch =  tf.Variable(initial_value=-1, trainable=False)
+        self.obs = None
         
         # self.log_alpha = tf.Variable(0.2, dtype=np.float32)
+        # self.alpha =  tf.exp(self.log_alpha) 
+        # self.target_entropy = tf.cast(-self.env.action_space.shape[0], dtype=tf.float32)
         self.target_entropy = -tf.constant(self.env.action_space.shape[0], dtype=tf.float32)
-        self.log_alpha = tf.Variable(0.2, dtype=tf.float32)
-        self.alpha = tf.exp(self.log_alpha) 
+        self.alpha = tf.Variable(0.0, dtype=tf.float32)
 
         # Training parameters
         self.end_of_episode = end_of_episode
@@ -163,138 +114,153 @@ class SAC(tf.keras.Model):
 
             return action[0]
     
-    #@tf.function#( experimental_relax_shapes=True, reduce_retracing=True)
-    #def sample_observations(self):
-    #    return random.sample(self.memory, self.batch_size)
+    @tf.function(reduce_retracing=True)
+    def train_step(self, data):       
+        _,_ = data
         
-    def get_sample(self):
-        
-        #batch = self.sample_observations()
-        batch = random.sample(self.memory, self.batch_size)
+        def get_sample():
+            batch = random.sample(self.memory, self.batch_size)
 
-        s = np.array([each[0] for each in batch]).reshape((self.batch_size, self.obs_shape[0]))
-        a = np.array([each[1] for each in batch])
-        s_ = np.array([each[2] for each in batch]).reshape((self.batch_size, self.obs_shape[0]))
-        r = np.array([each[3] for each in batch]).reshape((self.batch_size, 1))
-        #r = r - np.mean(r, axis=0) / (np.std(r, axis=0) + 1e-6) 
-        dones = np.array([(1-int(each[4])) for each in batch]).reshape((self.batch_size, 1))
-        
-    
-        return s,a,r,s_,dones
- 
-    def update_q_network(self, current_states, actions, rewards, next_states, ends, epoch):
-
-        # Sample actions from the policy for next states
-        next_mu, pi_a, log_pi_a = self.policy(next_states)
-        # Get Q value estimates from target Q network
-        q1_target = self.target_q1(next_states, pi_a)
-        q2_target = self.target_q2(next_states, pi_a)
-        min_q_target = tf.minimum(q1_target, q2_target)
-        # Add the entropy term to get soft Q target
-    
-        soft_q_target = min_q_target - self.alpha * log_pi_a
-        q_targets = tf.stop_gradient(rewards + self.discount * ends * soft_q_target)
-        
-        with tf.GradientTape() as tape1:
-            # Get Q value estimates, action used here is from the replay buffer
-            q1 = self.q1(current_states, actions)
-            critic1_loss = tf.reduce_mean((q1 - q_targets)**2)
-
-        with tf.GradientTape() as tape2:
-            # Get Q value estimates, action used here is from the replay buffer
-            q2 = self.q2(current_states, actions)
-            critic2_loss = tf.reduce_mean((q2 - q_targets)**2)
-
-        grads1 = tape1.gradient(critic1_loss, self.q1.trainable_variables)
-        self.critic1_optimizer.apply_gradients(zip(grads1,
-                                                   self.q1.trainable_variables))
-
-        grads2 = tape2.gradient(critic2_loss, self.q2.trainable_variables)
-        self.critic2_optimizer.apply_gradients(zip(grads2,
-                                                   self.q2.trainable_variables))
-
-        # with self.tb_summary_writer.as_default():
-        #     for grad, var in zip(grads1, self.q1.trainable_variables):
-        #         tf.summary.histogram(f"grad-{var.name}", grad, epoch)
-        #         tf.summary.histogram(f"var-{var.name}", var, epoch)
-        #     for grad, var in zip(grads2, self.q2.trainable_variables):
-        #         tf.summary.histogram(f"grad-{var.name}", grad, epoch)
-        #         tf.summary.histogram(f"var-{var.name}", var, epoch)
-
-        return critic1_loss, critic2_loss
-    
-    def update_policy_network(self, current_states, epoch):
-        
-        with tf.GradientTape() as tape:
-            # Sample actions from the policy for current states
-            mu, pi_a, log_pi_a = self.policy(current_states)
-
-            # Get Q value estimates from target Q network
-            q1 = self.q1(current_states, pi_a)
-            q2 = self.q2(current_states, pi_a)
-
-            # Apply the clipped double Q trick
-            # Get the minimum Q value of the 2 target networks
-            min_q = tf.minimum(q1, q2)
-            actor_loss = tf.reduce_mean(self.alpha * log_pi_a - min_q)
-
-        variables = self.policy.trainable_variables
-        grads = tape.gradient(actor_loss, variables)
-        self.actor_optimizer.apply_gradients(zip(grads, variables))
-
-        # with self.tb_summary_writer.as_default():
-        #     for grad, var in zip(grads, variables):
-        #         tf.summary.histogram(f"grad-{var.name}", grad, epoch)
-        #         tf.summary.histogram(f"var-{var.name}", var, epoch)
-
-        return actor_loss, log_pi_a
-
-    def update_alpha(self, current_states, epoch):
-        with tf.GradientTape() as tape:
-            mu, pi_a, log_pi_a = self.policy(current_states)
+            s = np.array([each[0] for each in batch]).reshape((self.batch_size, self.obs_shape[0]))
+            a = np.array([each[1] for each in batch])
+            s_ = np.array([each[2] for each in batch]).reshape((self.batch_size, self.obs_shape[0]))
+            r = np.array([each[3] for each in batch]).reshape((self.batch_size, 1))
+            #r = r - np.mean(r, axis=0) / (np.std(r, axis=0) + 1e-6) 
+            dones = np.array([(1-each[4]) for each in batch]).reshape((self.batch_size, 1))
             
-            alpha_backup = tf.stop_gradient(log_pi_a + self.target_entropy)
-            alpha_loss  = - tf.reduce_mean(self.log_alpha * alpha_backup)
         
-            #alpha_loss = tf.reduce_mean( - self.alpha*(log_pi_a + self.target_entropy))
-            #alpha_loss = tf.reduce_mean( - self.alpha*(tf.stop_gradient(log_pi_a) + self.target_entropy))# Changed
+            return s,a,r,s_,dones
+    
 
-        variables = [self.log_alpha]
-        grads = tape.gradient(alpha_loss, variables)
-        self.alpha_optimizer.apply_gradients(zip(grads, variables))
+        def update_q_network( current_states, actions, rewards, next_states, ends, epoch):
 
-        # with self.tb_summary_writer.as_default():
-        #     for grad, var in zip(grads, variables):
-        #         tf.summary.histogram(f"grad-{var.name}", grad, epoch)
-        #         tf.summary.histogram(f"var-{var.name}", var, epoch)
+            # Sample actions from the policy for next states
+            next_mu, pi_a, log_pi_a = self.policy(next_states)
+            # Get Q value estimates from target Q network
+            q1_target = self.target_q1(next_states, pi_a)
+            q2_target = self.target_q2(next_states, pi_a)
+            min_q_target = tf.minimum(q1_target, q2_target)
+            # Add the entropy term to get soft Q target
+            soft_q_target = min_q_target - self.alpha * log_pi_a
+            y = tf.stop_gradient(rewards + self.discount * ends * soft_q_target)
+            
+            with tf.GradientTape() as tape1:
+                # Get Q value estimates, action used here is from the replay buffer
+                q1 = self.q1(current_states, actions)
+                critic1_loss = tf.reduce_mean((q1 - y)**2)
 
-        return alpha_loss
+            with tf.GradientTape() as tape2:
+                # Get Q value estimates, action used here is from the replay buffer
+                q2 = self.q2(current_states, actions)
+                critic2_loss = tf.reduce_mean((q2 - y)**2)
 
-    def train(self, epoch):
+            grads1 = tape1.gradient(critic1_loss, self.q1.trainable_variables)
+            self.critic1_optimizer.apply_gradients(zip(grads1,
+                                                    self.q1.trainable_variables))
 
-        obs, action, reward, next_obs, done = self.get_sample()
-        done = tf.cast(done, dtype= tf.float32)
-        reward = tf.cast(reward, dtype= tf.float32)
+            grads2 = tape2.gradient(critic2_loss, self.q2.trainable_variables)
+            self.critic2_optimizer.apply_gradients(zip(grads2,
+                                                    self.q2.trainable_variables))
 
-        obs = tf.convert_to_tensor(obs, dtype=tf.float32)
-        next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
-        reward = tf.convert_to_tensor(reward, dtype=tf.float32)
-        action = tf.convert_to_tensor(action, dtype=tf.float32)
+            with self.tb_summary_writer.as_default():
+                for grad, var in zip(grads1, self.q1.trainable_variables):
+                    tf.summary.histogram(f"grad-{var.name}", grad, epoch)
+                    tf.summary.histogram(f"var-{var.name}", var, epoch)
+                for grad, var in zip(grads2, self.q2.trainable_variables):
+                    tf.summary.histogram(f"grad-{var.name}", grad, epoch)
+                    tf.summary.histogram(f"var-{var.name}", var, epoch)
 
-        # Update policy network weights
-        actor_loss, log_pi_a = self.update_policy_network(obs, epoch)
+            return critic1_loss, critic2_loss
 
-        # Update Q network weights
-        critic1_loss, critic2_loss = self.update_q_network(obs, action, reward, next_obs, done, epoch)
-        alpha_loss = self.update_alpha(obs, epoch)
-        self.update_weights()
+        def update_policy_network( current_states, epoch):
+            
+            with tf.GradientTape() as tape:
+                # Sample actions from the policy for current states
+                mu, pi_a, log_pi_a = self.policy(current_states)
 
-        self.alpha = tf.exp(self.log_alpha) 
-        return actor_loss, critic1_loss, critic2_loss,  alpha_loss, log_pi_a
-  
-    def run_agent(self, epoch, obs):
+                # Get Q value estimates from target Q network
+                q1 = self.q1(current_states, pi_a)
+                q2 = self.q2(current_states, pi_a)
+
+                # Apply the clipped double Q trick
+                # Get the minimum Q value of the 2 target networks
+                min_q =tf.minimum(q1, q2)
+                soft_q = self.alpha * log_pi_a - min_q
+                actor_loss = tf.reduce_mean(soft_q)
+
+            variables = self.policy.trainable_variables
+            grads = tape.gradient(actor_loss, variables)
+            self.actor_optimizer.apply_gradients(zip(grads, variables))
+
+            with self.tb_summary_writer.as_default():
+                for grad, var in zip(grads, variables):
+                    tf.summary.histogram(f"grad-{var.name}", grad, epoch)
+                    tf.summary.histogram(f"var-{var.name}", var, epoch)
+
+            return actor_loss
 
 
+        def update_alpha( current_states, epoch):
+            with tf.GradientTape() as tape:
+                mu, pi_a, log_pi_a = self.policy(current_states)
+                alpha_loss = tf.reduce_mean( - self.alpha*(log_pi_a + self.target_entropy))
+
+            variables = [self.alpha]
+            grads = tape.gradient(alpha_loss, variables)
+            self.alpha_optimizer.apply_gradients(zip(grads, variables))
+
+            with self.tb_summary_writer.as_default():
+                for grad, var in zip(grads, variables):
+                    tf.summary.histogram(f"grad-{var.name}", grad, epoch)
+                    tf.summary.histogram(f"var-{var.name}", var, epoch)
+
+            return alpha_loss
+
+        def train_model(epoch):
+            obs, action, reward, next_obs, done = get_sample()
+            done = tf.cast(done, dtype= tf.float32)
+            reward = tf.cast(reward, dtype= tf.float32)
+
+            obs = tf.convert_to_tensor(obs, dtype=tf.float32)
+            next_obs = tf.convert_to_tensor(next_obs, dtype=tf.float32)
+            reward = tf.convert_to_tensor(reward, dtype=tf.float32)
+            action = tf.convert_to_tensor(action, dtype=tf.float32)
+
+            # Update policy network weights
+            actor_loss = update_policy_network(obs, epoch)
+
+            # Update Q network weights
+            critic1_loss, critic2_loss = update_q_network(obs, action, reward, next_obs, done, epoch)
+            alpha_loss = update_alpha(obs, epoch)
+            self.update_weights()
+            return actor_loss, critic1_loss, critic2_loss,  alpha_loss
+        
+       
+        if self.obs  is None :
+            self.obs = tf.Variable(initial_value=tf.zeros(self.env.observation_space.shape), trainable=False)
+            
+            self.obs.assign(self.train_env.reset())
+            self.update_weights(True)
+        
+        self.epoch.assign_add(1)
+        
+        epoch = tf.cast(self.epoch, dtype = tf.int64)
+        self.obs.assign(self.call((epoch, self.obs)))
+        
+        if len(self.memory) >= self.update_after and epoch % self.update_every == 0:
+            for _ in range(self.train_epochs):
+                actor_loss, critic_1_loss, critic_2_loss, alpha_loss = train_model(epoch)
+            self.append_training_metrics( actor_loss, critic_1_loss, critic_2_loss, alpha_loss, epoch)
+
+
+        return {"total_train_reward": self.total_rewards}
+        
+    @tf.function(reduce_retracing=True)
+    def call(self, data):
+        epoch, obs = data[0],data[1]
+
+        #obs = tf.reshape(obs, (1,self.obs_shape[0]))
+        
         if epoch < 10000:
             actions = self.train_env.action_space.sample()
 
@@ -307,30 +273,22 @@ class SAC(tf.keras.Model):
         
         self.memory.append([obs, actions, new_obs, rewards/self.reward_scaler, done])
         self.total_rewards = self.total_rewards + rewards
-
         self.append_RT_metrics(actions, obs, done, epoch)
-        
-        if len(self.memory) >= self.update_after and epoch % self.update_every == 0:
-            for _ in range(self.train_epochs):
-                actor_loss, critic_1_loss, critic_2_loss, alpha_loss, log_pi_a = self.train(epoch)
-            self.append_training_metrics( actor_loss, critic_1_loss, critic_2_loss, alpha_loss, log_pi_a, epoch)
-                
 
+        
         obs = new_obs
         if done and epoch >0  :
             obs = self.train_env.reset()#[0]
             self.rewards_train_history.append(self.total_rewards)
         
             with self.tb_summary_writer.as_default():
-                tf.summary.scalar('Episode_total_reward', self.total_rewards, step=self.episode_counter)
+                tf.summary.scalar('Training_rewards', self.total_rewards, step=epoch)
 
             self.total_rewards = 0
-            self.episode_counter +=1
-            gc.collect()
-
 
         return obs
-
+        
+        
     def evaluate(self, eval_env, n_tries=1, hyp= False):
         rewards_history = []
         for _ in range(n_tries):
@@ -352,6 +310,7 @@ class SAC(tf.keras.Model):
 
         return rewards_history
 
+
     def evaluate_agent(self, epoch, sucess_criteria_epochs = 100):
         if (epoch %  self.evaluation_epoch == 0 )  and epoch >0:
             rewards_history = np.mean(self.evaluate(self.env , n_tries=1))
@@ -360,38 +319,35 @@ class SAC(tf.keras.Model):
             with self.tb_summary_writer.as_default():
                 tf.summary.scalar('Eval_rewards', self.rewards_val_history[-1], step=epoch)
 
-                if len(self.rewards_val_history)> sucess_criteria_epochs: 
-                    tf.summary.scalar('Eval_average_rewards', np.mean(self.rewards_val_history[-sucess_criteria_epochs:]), step=epoch)
+                if len(self.rewards_train_history)> sucess_criteria_epochs: 
                     tf.summary.scalar('Train_average_rewards', np.mean(self.rewards_train_history[-sucess_criteria_epochs:]), step=epoch)
-                else:
-                    tf.summary.scalar('Eval_average_rewards', np.mean(self.rewards_val_history), step=epoch)
+                elif len(self.rewards_train_history)>0 and len(self.rewards_train_history) <= sucess_criteria_epochs:
                     tf.summary.scalar('Train_average_rewards', np.mean(self.rewards_train_history), step=epoch)
+                    
 
     def append_RT_metrics(self, _batch_actions, _batch_states, _batch_done, epoch):
-        if epoch %100 == 0:
-            with self.tb_summary_writer.as_default():
-                tf.summary.scalar('RT_rewards', self.total_rewards, step=epoch)
-                tf.summary.scalar('entropy', self.alpha , step=epoch)
-                
+
         if _batch_done:
             with self.tb_summary_writer.as_default():
                 tf.summary.scalar('RT_done', 0, step=epoch)
                 tf.summary.scalar('RT_done', 1, step=epoch+1)
 
-        
-                
-    def append_training_metrics(self, _actor_loss, critic_1_loss, critic_2_loss, alpha_loss, log_pi_a, epoch):
+        if epoch %50 == 0:
+            with self.tb_summary_writer.as_default():
+                tf.summary.scalar('RT_rewards', self.total_rewards, step=epoch)
+                tf.summary.scalar('entropy', self.alpha , step=epoch)
 
-        with self.tb_summary_writer.as_default():
-            tf.summary.scalar('RT_rewards', self.total_rewards, step=epoch)
-            tf.summary.scalar('actor_loss', _actor_loss, step=epoch)
-            tf.summary.scalar('critic_1_loss',  tf.reduce_mean(critic_1_loss), step=epoch)
-            tf.summary.scalar('critic_2_loss',  tf.reduce_mean(critic_2_loss), step=epoch)
-            tf.summary.scalar('Entropy loss',  tf.reduce_mean(alpha_loss), step=epoch)
-            tf.summary.scalar('log_pi_a',  tf.reduce_mean(log_pi_a), step=epoch)
-            tf.summary.scalar('Log_alpha', self.log_alpha , step=epoch)
-            tf.summary.scalar('Memory size', len(self.memory), step=epoch )
-                
+    def append_training_metrics(self, _actor_loss, critic_1_loss, critic_2_loss, alpha_loss,  epoch):
+
+        if epoch %50 == 0:
+            with self.tb_summary_writer.as_default():
+                tf.summary.scalar('RT_rewards', self.total_rewards, step=epoch)
+                tf.summary.scalar('actor_loss', _actor_loss, step=epoch)
+                tf.summary.scalar('critic_1_loss',  np.mean(critic_1_loss), step=epoch)
+                tf.summary.scalar('critic_2_loss',  np.mean(critic_2_loss), step=epoch)
+                tf.summary.scalar('Entropy loss',  np.mean(alpha_loss), step=epoch)
+                tf.summary.scalar('Alpha', self.alpha , step=epoch)
+
     def update_weights(self, init=False):
 
         """ assign target_network.weights variables to their respective agent.weights values. """
@@ -422,8 +378,7 @@ class Actor(tf.keras.Model):
         self.mean_dense = Dense(units=self.env.action_space.shape[0], name='actor_mu' )
         self.log_std_dense = Dense(units=self.env.action_space.shape[0],  name='actor_sigma')
         self.noise = 1e-6
-    
-    @tf.function( experimental_relax_shapes=True, reduce_retracing=True)
+        
     def call(self, observations):
         # Get mean and standard deviation from the policy network
         x = observations
@@ -462,7 +417,7 @@ class Critic(tf.keras.Model):
         self.dense_layers = [Dense(d[i], activation='relu', name ="inp_"+str(i)) for i in range(num_layer_crit)]
         self.num_layers = num_layer_crit
         self.d_state_value = Dense(1,  name ="v")
-    
+        
     def call(self, observations, action):
 
         x = tf.concat([observations, action], axis=-1)
@@ -500,7 +455,7 @@ class MyHyperModel(kt.HyperModel):
                   tau_value = None, 
                   num_layers_act = None, num_layers_crit = None,
                   max_num_layers_act = 1, max_num_layers_crit= 1, 
-                  train_epochs=50):
+                  train_epochs=20):
         
         self.writer = writer
         self.hyper_dir = hyper_dir 
@@ -617,29 +572,31 @@ class MyHyperModel(kt.HyperModel):
         for callback in callbacks:
             callback.model = model
 
-        obs = model.train_env.reset()#[0]
-        model.update_weights(True)
+        # obs = model.train_env.reset()#[0]
+        # model.update_weights(True)
 
-        for epoch in range(training_steps):
+        # for epoch in range(training_steps):
             
-            new_obs = model.run_agent(epoch, obs)
-            model.evaluate_agent(epoch)
+        #     new_obs = model.run_agent(epoch, obs)
+        #     model.evaluate_agent(epoch)
 
-            obs = new_obs
+        #     obs = new_obs
 
-            if epoch %  model.evaluation_epoch == 0 and len(model.rewards_val_history)> 0 and len(model.rewards_train_history)> 0 and epoch >0:
-                print(f"Epoch: {epoch} : Reward eval/Train: {np.mean(model.rewards_val_history)}/{np.mean(model.rewards_train_history)} ")
+        #     if epoch %  model.evaluation_epoch == 0 and len(model.rewards_val_history)> 0 and len(model.rewards_train_history)> 0 and epoch >0:
+        #         print(f"Epoch: {epoch} : Reward eval/Train: {np.mean(model.rewards_val_history)}/{np.mean(model.rewards_train_history)} ")
 
-            if len(model.rewards_val_history)> self.sucess_criteria_epochs :
-                if np.mean(model.rewards_val_history[-self.sucess_criteria_epochs:]) >= self.sucess_criteria_value:
-                    print("Your agent reached the objetive")
-                    break
-        
+        #     if len(model.rewards_val_history)> self.sucess_criteria_epochs :
+        #         if np.mean(model.rewards_val_history[-self.sucess_criteria_epochs:]) >= self.sucess_criteria_value:
+        #             print("Your agent reached the objetive")
+        #             break
+        model.compile()
+        model.fit(x = [0], y = [0], epochs = training_steps, verbose = 0)
+    
         final_reward = np.mean(model.rewards_train_history[-100:])
         best_epoch_loss = max(best_epoch_loss, final_reward)
 
         for callback in callbacks:
-            callback.on_epoch_end(epoch, logs={"total_train_reward" : final_reward})#total_eval_reward
+            callback.on_epoch_end(model.epoch, logs={"total_train_reward" : final_reward})#total_eval_reward
 
         # Return the evaluation metric value.
         return best_epoch_loss
@@ -648,7 +605,7 @@ class MyHyperModel(kt.HyperModel):
 def run_training(training_steps,   discount,  dense_units_act,  dense_units_crit,num_layer_a,num_layer_c,
                   writer, end_of_episode, save_factor=50000, sucess_criteria_epochs =100, sucess_criteria_value = -100, 
                  environment_name="MountainCar-v0", reward_scaler = 1, evaluation_epoch = 2000,return_agent = False,lr_actor= 0.001, lr_critic_1= 0.001, lr_alpha = 0.001,
-                   tau = 0.001,  train_epochs = 50, model_path = './checkpoints/SACagent', model = None):
+                   tau = 0.001,  train_epochs = 20, model_path = './checkpoints/SACagent', model = None):
   
 
     if model is None:
@@ -669,30 +626,27 @@ def run_training(training_steps,   discount,  dense_units_act,  dense_units_crit
                 train_epochs = train_epochs
                 )
     
-    obs = model.train_env.reset()#[0]
-    model.update_weights(True)
-    with tqdm.trange(training_steps) as t:
-        for epoch in t:
-            new_obs = model.run_agent(epoch, obs)               
-            model.evaluate_agent(epoch)
+    model.compile()
+    model.fit(x = [0], y = [0], epochs = training_steps, verbose = 0)
+    # model.update_weights(True)
+    
+    # with tqdm.trange(training_steps) as t:
+    #     for epoch in t:
+    #         new_obs = model.run_agent(epoch, obs)
+    #         model.evaluate_agent(epoch)
 
-            obs = new_obs
+    #         obs = new_obs
             
-            if epoch %save_factor == 0: 
-        
-                model.policy.save_weights(model_path+"_policy")
-                model.q1.save_weights(model_path+"_q1")
-                model.q2.save_weights(model_path+"_q2")
-                model.target_q1.save_weights(model_path+"_target_q1")
-                model.target_q2.save_weights(model_path+"_target_q2")
+    #         if epoch %save_factor == 0: 
+    #             model.save_weights(model_path)
 
-            if len(model.rewards_train_history)> 100 :
-                if epoch %  model.evaluation_epoch*50 == 0 :
-                    print(f"Epoch: {epoch} : Reward Train: {np.mean(model.rewards_train_history[-100:])} ")
+    #         if len(model.rewards_train_history)> 100 :
+    #             if epoch %  model.evaluation_epoch*50 == 0 :
+    #                 print(f"Epoch: {epoch} : Reward Train: {np.mean(model.rewards_train_history[-100:])} ")
 
-                if np.mean(model.rewards_val_history[-sucess_criteria_epochs:]) >= sucess_criteria_value:
-                    print("Your agent reached the objetive")
-                    break
+    #             if np.mean(model.rewards_val_history[-sucess_criteria_epochs:]) >= sucess_criteria_value:
+    #                 print("Your agent reached the objetive")
+    #                 break
 
     if return_agent:
         return model
@@ -711,11 +665,7 @@ def rerun_training(training_steps, save_factor = 50000,  model_path = './checkpo
             obs = new_obs
             
             if epoch %save_factor == 0: 
-                model.policy.save_weights(model_path+"_policy")
-                model.q1.save_weights(model_path+"_q1")
-                model.q2.save_weights(model_path+"_q2")
-                model.target_q1.save_weights(model_path+"_target_q1")
-                model.target_q2.save_weights(model_path+"_target_q2")
+                model.save_weights(model_path)
 
             if len(model.rewards_train_history)> 100 :
                 if epoch %  model.evaluation_epoch*50 == 0 :
