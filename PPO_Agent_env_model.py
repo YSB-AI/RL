@@ -47,6 +47,8 @@ tf.debugging.set_log_device_placement(False)
 seed =0
 np.random.seed(seed)
 tf.random.set_seed(seed) #https://github.com/tensorflow/tensorflow/issues/37252
+tf.keras.utils.set_random_seed(seed)
+from tensorboard.plugins.hparams import api as hp
 
 from pympler.tracker import SummaryTracker
 
@@ -54,10 +56,11 @@ class PPO(tf.keras.Model):
     def __init__(self,  discount, dense_units_act_crit,  dense_units_model, num_layer_act_crit, num_layer_model, writer,  lr_actor_critic, lr_model, trial_n = "", 
     evaluation_epoch = 2500, environment_name="",  gae_lambda=0.95, policy_clip = 0.2, training_epoch=20, entropy_coeff = 0.05, memory_size = 50, scaling_factor_reward = 0.1,
     normalize_reward = False, normalize_advantage = False, kl_divergence_target  = 0.01, training_steps = 1000000, sucess_criteria_epochs = 100, sucess_criteria_value = None, 
-    use_mlflow = False, reward_norm_factor = 1):
+    use_mlflow = False, reward_norm_factor = 1, force_extreme_exploration  = False):
         super(PPO, self).__init__()
         
 
+        self.force_extreme_exploration = force_extreme_exploration
         self.training_steps = training_steps
         self.sucess_criteria_epochs  = sucess_criteria_epochs 
         self.sucess_criteria_value = sucess_criteria_value
@@ -99,9 +102,9 @@ class PPO(tf.keras.Model):
             self.env_model = EnvironmentModel(env = self.env, obs_shape=self.obs_shape[0],  d = dense_units_model,  num_layer_model = num_layer_model)
         
         # Agents components
+        #tf.summary.trace_on(graph=True, profiler=True)
         self.actor_critic = Actor_Critic(env = self.env,  d = dense_units_act_crit, num_layer_act_crit = num_layer_act_crit)
-        
-        
+               
 
         self.train_env =  gym.make(environment_name)
         
@@ -112,13 +115,14 @@ class PPO(tf.keras.Model):
         
         
         self.profiler_log_dir = writer + self.trial_n+ "_profiler_"+ datetime.now().strftime("%Y%m%d-%H%M%S")
-       
+    
         if self.use_mlflow : mlflow.set_experiment(f'[{datetime.now().strftime("%Y%m%d-%H%M%S")}] RL Project- PPO for {environment_name} ')
         
         
         self.parameters_to_monitor = {
+            "trial_n" : self.trial_n,
             "discount" : discount,
-            "gae_lambda" : "gae_lambda",
+            "gae_lambda" : gae_lambda,
             "environment_name":self.environment_name,
             "lr_actor_critic" : lr_actor_critic,
             "entropy_coeff" : entropy_coeff,
@@ -132,29 +136,16 @@ class PPO(tf.keras.Model):
             "normalize_advantage" : normalize_advantage
         }
         
-        
+        for i in range(num_layer_act_crit):
+            self.parameters_to_monitor['dense_units_actor_critic_'+str(i)] = dense_units_act_crit[i]
     
         with self.tb_summary_writer.as_default():
-            tf.summary.scalar('discount', discount, step=0)
-            tf.summary.scalar('gae_lambda', gae_lambda, step=0)
-            for i in range(num_layer_act_crit):
-                tf.summary.scalar('dense_units_actor_critic_'+str(i), dense_units_act_crit[i], step=0)
-                self.parameters_to_monitor['dense_units_actor_critic_'+str(i)] = dense_units_act_crit[i]
+            # tf.summary.trace_export(
+            #     name="agent_trace",
+            #     step=0,
+            #     profiler_outdir=self.log_dir)
+            hp.hparams(self.parameters_to_monitor)
 
-            tf.summary.text('environment_name', self.environment_name , step=0)
-            tf.summary.scalar('lr_actor_critic', lr_actor_critic , step=0)
-            tf.summary.scalar('entropy_coeff', entropy_coeff, step=0)
-            tf.summary.scalar('policy_clip', policy_clip, step=0)
-            tf.summary.scalar('scaling_factor_reward', scaling_factor_reward, step=0)
-            tf.summary.scalar('kl_divergence_target', kl_divergence_target, step=0)
-            tf.summary.scalar('memory_size', memory_size, step=0)
-            tf.summary.scalar('training_epoch', training_epoch, step=0)
-            tf.summary.scalar('evaluation_epoch', evaluation_epoch, step=0)
-            tf.summary.scalar('normalize_reward', int(normalize_reward), step=0)
-            tf.summary.scalar('normalize_advantage', int(normalize_advantage), step=0)
-            
-        
-            
         self.rewards_train_history = []
         self.rewards_val_history = []
         self.total_rewars = 0
@@ -381,8 +372,11 @@ class PPO(tf.keras.Model):
                 self.episode_reward = 0 
                 next_obs = self.train_env.reset()
                 #predicted_next_obs = next_obs
+        
+        if self.force_extreme_exploration:
+            next_obs = predicted_next_obs
 
-        return next_obs#predicted_next_obs#next_obs#predicted_next_obs
+        return next_obs
         
 
     def evaluate(self, eval_env, n_tries=1, hyp= False):
@@ -487,6 +481,8 @@ class PPO(tf.keras.Model):
 
 
     def train_agent(self):
+
+
         if self.sucess_criteria_value is None :
             raise Exception ("Missing sucess criteria !")
         
@@ -632,7 +628,7 @@ class MyHyperModel(kt.HyperModel):
                   entropy_factor = None,
                   memory_size = 50, training_epoch_max = None, memory_size_max = None, normalize_reward = False, normalize_advantage = False, 
                   scaling_factor_reward = None, use_mlflow = False,
-                  reward_norm_factor  = 1):
+                  reward_norm_factor  = 1, force_extreme_exploration = False):
         
         self.writer = writer
         self.hyper_dir = hyper_dir 
@@ -686,6 +682,7 @@ class MyHyperModel(kt.HyperModel):
         self.kl_divergence_target  = kl_divergence_target
         self.use_mlflow = use_mlflow
         self.reward_norm_factor=reward_norm_factor
+        self.force_extreme_exploration = force_extreme_exploration
 
     def build(self, hp):
         K.clear_session()
@@ -711,7 +708,7 @@ class MyHyperModel(kt.HyperModel):
             lr_model = hp.Float('lr_model', self.lr_model_min, self.lr_model_max)
         
         policy_clip = self.policy_clip
-        if policy_clip is None: policy_clip = hp.Float('policy_clip', 0.1, 0.3, step =0.1)
+        if policy_clip is None: policy_clip = hp.Float('policy_clip', 0.1, 0.4, step =0.1)
         
         scaling_factor_reward = self.scaling_factor_reward 
         if self.scaling_factor_reward == None:
@@ -773,7 +770,8 @@ class MyHyperModel(kt.HyperModel):
             normalize_advantage = self.normalize_advantages, 
             kl_divergence_target = kl_divergence_target,
             use_mlflow = self.use_mlflow,
-            reward_norm_factor = self.reward_norm_factor
+            reward_norm_factor = self.reward_norm_factor,
+            force_extreme_exploration = self.force_extreme_exploration
             )
         return actorcritic_agent
 
@@ -787,7 +785,7 @@ class MyHyperModel(kt.HyperModel):
         for callback in callbacks:
             callback.model = model
         
-        last_epoch = model.train_agent()
+        last_epoch = model.train_agent( )
         
         final_reward = np.mean(model.rewards_train_history)
         best_epoch_loss = max(best_epoch_loss, final_reward)
@@ -812,7 +810,7 @@ def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units
                  environment_name="MountainCar-v0",  evaluation_epoch = 2000,return_agent = False,
                  lr_actor_critic= 0.001,  lr_model= 0.00001,  gae_lambda=0.95, training_epoch= 20, entropy_coeff= 0.01, 
                  policy_clip = 0.2,memory_size= 50, id = 1, normalize_reward = False, normalize_advantage = False,  scaling_factor_reward = 0.1,
-                 kl_divergence_target = 0.01, use_mlflow = False, reward_norm_factor = 1):
+                 kl_divergence_target = 0.01, use_mlflow = False, reward_norm_factor = 1, force_extreme_exploration = False):
   
     model = PPO(
         training_steps = training_steps, 
@@ -838,7 +836,8 @@ def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units
         scaling_factor_reward=scaling_factor_reward,
         kl_divergence_target = kl_divergence_target,
         use_mlflow = use_mlflow,
-        reward_norm_factor = reward_norm_factor
+        reward_norm_factor = reward_norm_factor,
+        force_extreme_exploration = force_extreme_exploration
     )
     
     model.train_agent()

@@ -65,27 +65,28 @@ tf.keras.utils.set_random_seed(seed)
 #policy = mixed_precision.Policy('mixed_float16')
 #mixed_precision.set_global_policy(policy)
 
+from tensorboard.plugins.hparams import api as hp
 
 import subprocess
 from gym.wrappers.monitoring.video_recorder import VideoRecorder
 
-GPU_ONLY = True
-print("Num devices available: ", tf.config.experimental.list_physical_devices())
-if GPU_ONLY:
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-      # Restrict TensorFlow to only use the first GPU
-      try:
-        tf.config.set_visible_devices(gpus[0], 'GPU')
-        logical_gpus = tf.config.list_logical_devices('GPU')
-        print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPU")
-      except RuntimeError as e:
-        # Visible devices must be set before GPUs have been initialized
-        print(e)
-else:
-    print("Num devices available: ", tf.config.experimental.list_physical_devices())
-    tf.config.experimental.set_visible_devices([], 'GPU')
-tf.debugging.set_log_device_placement(False)
+# GPU_ONLY = True
+# print("Num devices available: ", tf.config.experimental.list_physical_devices())
+# if GPU_ONLY:
+#     gpus = tf.config.list_physical_devices('GPU')
+#     if gpus:
+#       # Restrict TensorFlow to only use the first GPU
+#       try:
+#         tf.config.set_visible_devices(gpus[0], 'GPU')
+#         logical_gpus = tf.config.list_logical_devices('GPU')
+#         print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPU")
+#       except RuntimeError as e:
+#         # Visible devices must be set before GPUs have been initialized
+#         print(e)
+# else:
+#     print("Num devices available: ", tf.config.experimental.list_physical_devices())
+#     tf.config.experimental.set_visible_devices([], 'GPU')
+# tf.debugging.set_log_device_placement(False)
 
 class SAC(tf.keras.Model):
     def __init__(self,  discount, dense_units_act, dense_units_crit, tau, num_layer_act, num_layer_crit, writer,  lr_actor, lr_critic, lr_alpha, trial_n = "", end_of_episode = 200, 
@@ -96,7 +97,8 @@ class SAC(tf.keras.Model):
         self.obs_shape = self.env.observation_space.shape
         self.evaluation_epoch = evaluation_epoch
         self.environment_name= environment_name
-        self.memory = deque(maxlen= 1000000) # WAS 1000000
+        self.max_memory_size = 1000000
+        self.memory = deque(maxlen= self.max_memory_size) # WAS 1000000
         self.update_after = 1000
         self.batch_size = 256
         self.update_every = 50
@@ -132,21 +134,31 @@ class SAC(tf.keras.Model):
         self.log_dir = writer + self.trial_n+ datetime.now().strftime("%Y%m%d-%H%M%S")
         self.tb_summary_writer = tf.summary.create_file_writer(self.log_dir)
 
-    
+        self.parameters_to_monitor = {
+            "discount" : discount,
+            "end_of_episode" : end_of_episode,
+            "environment_name":self.environment_name,
+            "lr_actor" : lr_actor,
+            "lr_critic" : lr_critic,
+            "reward_scaler" : reward_scaler,
+
+            "update_after" : self.update_after,
+            "batch_size" : self.batch_size,
+            "update_every" : self.update_every,
+            "train_epochs" : train_epochs,
+            "evaluation_epoch" : evaluation_epoch,
+            "memory_size" : self.max_memory_size
+        }
+        
+        for i in range(num_layer_act):
+            self.parameters_to_monitor['dense_units_act_'+str(i)] = dense_units_act[i]
+
+        for i in range(num_layer_crit):
+            self.parameters_to_monitor['dense_units_crit_'+str(i)] = dense_units_crit[i]
 
         with self.tb_summary_writer.as_default():
-            tf.summary.scalar('discount', discount, step=0)
-            for i in range(num_layer_act):
-                tf.summary.scalar('dense_units_act_'+str(i), dense_units_act[i], step=0)
+            hp.hparams(self.parameters_to_monitor)
 
-            for i in range(num_layer_crit):
-                tf.summary.scalar('dense_units_crit_'+str(i), dense_units_crit[i], step=0)
-
-            tf.summary.scalar('end_of_episode', self.end_of_episode , step=0)
-            tf.summary.text('environment_name', self.environment_name , step=0)
-            tf.summary.scalar('lr_actor', lr_actor , step=0)
-            tf.summary.scalar('lr_critic_1', lr_critic , step=0)
-            tf.summary.scalar('reward_scaler', reward_scaler , step=0)
 
 
         self.rewards_train_history = []
@@ -718,7 +730,7 @@ def rerun_training(training_steps, save_factor = 50000,  model_path = './checkpo
                 model.target_q2.save_weights(model_path+"_target_q2")
 
             if len(model.rewards_train_history)> 100 :
-                if epoch %  model.evaluation_epoch*50 == 0 :
+                if epoch %  model.evaluation_epoch*200 == 0 :
                     print(f"Epoch: {epoch} : Reward Train: {np.mean(model.rewards_train_history[-100:])} ")
 
                 if np.mean(model.rewards_val_history[-sucess_criteria_epochs:]) >= sucess_criteria_value:
