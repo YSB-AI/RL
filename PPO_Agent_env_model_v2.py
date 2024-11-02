@@ -482,7 +482,7 @@ class PPO(tf.keras.Model):
             
 
 
-    def train_agent(self):
+    def train_agent(self, monitoring_epoch = 2000):
 
 
         if self.sucess_criteria_value is None :
@@ -499,7 +499,7 @@ class PPO(tf.keras.Model):
 
                     obs = next_obs
                     
-                    if epoch %  2000 == 0 and len(self.rewards_val_history)> 0 and len(self.rewards_train_history)> 0 and epoch >0:
+                    if epoch %  monitoring_epoch == 0 and len(self.rewards_val_history)> 0 and len(self.rewards_train_history)> 0 and epoch >0:
                         print(f"Epoch: {epoch} : Reward eval/Train: {np.mean(self.rewards_val_history)}/{np.mean(self.rewards_train_history)} ")
 
                     if len(self.rewards_val_history)> self.sucess_criteria_epochs :
@@ -842,7 +842,7 @@ def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units
         force_extreme_exploration = force_extreme_exploration
     )
     
-    model.train_agent()
+    model.train_agent(monitoring_epoch = 10000)
 
     if return_agent:
         return model
@@ -867,7 +867,10 @@ def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="soft", video
     
             if k == 0 : video.capture_frame()
             actions, _, _, _ ,_ = eval_model.actor_critic(obs.reshape((1,eval_model.obs_shape[0])))
-                     
+            if eval_model.environment_name in ["BipedalWalker-v3", "Ant-v2"]:
+                if not isinstance(actions, float) :
+                    actions = actions[0,]
+
             obs, reward, done , info = eval_env.step(actions)
             total_reward += reward
             #done = truncated or terminated  #terminated, truncated 
