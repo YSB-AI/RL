@@ -50,15 +50,18 @@ tf.random.set_seed(seed) #https://github.com/tensorflow/tensorflow/issues/37252
 tf.keras.utils.set_random_seed(seed)
 from tensorboard.plugins.hparams import api as hp
 
-from pympler.tracker import SummaryTracker
+#from pympler.tracker import SummaryTracker
 
 class PPO(tf.keras.Model):
     def __init__(self,  discount, dense_units_act_crit,  dense_units_model, num_layer_act_crit, num_layer_model, writer,  lr_actor_critic, lr_model, trial_n = "", 
     evaluation_epoch = 2500, environment_name="",  gae_lambda=0.95, policy_clip = 0.2, training_epoch=20, entropy_coeff = 0.05, memory_size = 50, scaling_factor_reward = 0.1,
-    normalize_reward = False, normalize_advantage = False, kl_divergence_target  = 0.01, training_steps = 1000000, sucess_criteria_epochs = 100, sucess_criteria_value = None, 
+    normalize_advantage = False, kl_divergence_target  = 0.01, training_steps = 1000000, sucess_criteria_epochs = 100, sucess_criteria_value = None, 
     use_mlflow = False, reward_norm_factor = 1, force_extreme_exploration  = False):
         super(PPO, self).__init__()
         
+
+        if memory_size < 1: 
+            raise Exception("memory_size must be greater than 0 as it will be multiplied by the episode max environment steps")
 
         self.force_extreme_exploration = force_extreme_exploration
         self.training_steps = training_steps
@@ -74,7 +77,7 @@ class PPO(tf.keras.Model):
         self.memory_size = memory_size
         self.reward_norm_factor = reward_norm_factor
         
-        self.memory = deque(maxlen= self.memory_size)
+        self.memory = deque(maxlen= self.env._max_episode_steps * self.memory_size)
         self.episode_reward = 0 
         self.training_epoch = training_epoch
         self.training_counter = 0 
@@ -89,7 +92,6 @@ class PPO(tf.keras.Model):
         
         self.gae_lambda=gae_lambda
         self.discount = discount
-        self.normalize_reward = normalize_reward
         self.normalize_advantage = normalize_advantage
         
         
@@ -100,7 +102,7 @@ class PPO(tf.keras.Model):
             self.env_model_optimizer = Adam(learning_rate=lr_model)
             self.env_model_loss_fn = tf.keras.losses.MeanSquaredError()
             self.env_model = EnvironmentModel(env = self.env, obs_shape=self.obs_shape[0],  d = dense_units_model,  num_layer_model = num_layer_model)
-        
+            
         # Agents components
         #tf.summary.trace_on(graph=True, profiler=True)
         self.actor_critic = Actor_Critic(env = self.env,  d = dense_units_act_crit, num_layer_act_crit = num_layer_act_crit)
@@ -132,7 +134,6 @@ class PPO(tf.keras.Model):
             "memory_size" : memory_size,
             "training_epoch" : training_epoch,
             "evaluation_epoch" : evaluation_epoch,
-            "normalize_reward": normalize_reward,
             "normalize_advantage" : normalize_advantage
         }
         
@@ -154,7 +155,6 @@ class PPO(tf.keras.Model):
     def get_sample(self,next_state_value, epoch):
         s, s_, a, policy, v, rewards, dones = [], [], [], [], [], [], []
         
-        #[obs, next_obs, action, log_probs, state_value, reward, done,])
         for each in self.memory: 
 
             s.append(each[0].reshape((1,self.obs_shape[0])))
@@ -165,14 +165,6 @@ class PPO(tf.keras.Model):
             rewards.append(each[5]/ self.reward_norm_factor)
             dones.append( 1 - int(each[6]))
         
-        if self.normalize_reward : 
-            mean_reward = np.mean(rewards)
-            std_reward = np.std(rewards)+ 1e-7
-            normalized_rewards = [(r - mean_reward) / std_reward for r in rewards]
-            rewards = normalized_rewards
-            with self.tb_summary_writer.as_default():
-                tf.summary.scalar('Reward_mean_norm', mean_reward, step=epoch)
-                tf.summary.scalar('Reward_std_norm', std_reward, step=epoch)
         
         with self.tb_summary_writer.as_default(): 
             tf.summary.histogram(f'Rewards_for_training', rewards, step=epoch )
@@ -284,10 +276,12 @@ class PPO(tf.keras.Model):
 
         returns.reverse()
         advantage.reverse()
-
+        
         advantage = np.array(advantage, dtype=np.float32).reshape((len(advantage),))
 
-        advantage = (advantage - np.mean(advantage)) / (np.std(advantage) + 1e-8)
+        if self.normalize_advantage:
+            advantage = (advantage - np.mean(advantage)) / (np.std(advantage) + 1e-8)
+
         returns = np.array(returns, dtype=np.float32).reshape((len(returns),))
         
         return returns, advantage 
@@ -314,8 +308,6 @@ class PPO(tf.keras.Model):
         # if approx_kl > self.target_kl: #1.5 *
         #     print(f"Early stopping at step {k} due to reaching max kl.")
         #     break
-        
-        
         
         with self.tb_summary_writer.as_default():
             for i, grad in enumerate(actor_critic_grads):
@@ -357,10 +349,9 @@ class PPO(tf.keras.Model):
 
         
         self.memory.append([obs, next_obs, action, log_probs,  state_value, total_reward, done])
-        self.append_interaction_metrics(action, obs, reward,total_reward, done, epoch)
-        
-        if done or len(self.memory)== self.memory_size:        
-            
+        #self.append_interaction_metrics(action, obs, reward,total_reward, done, epoch)
+
+        if len(self.memory)== (self.env._max_episode_steps * self.memory_size) or ( len(self.memory) > (self.env._max_episode_steps* self.memory_size -1) and done ):      
             _,_,_,_,next_state_value = self.actor_critic(next_obs.reshape((1,self.obs_shape[0])))
             
             total_loss, actor_loss, critic_loss, advantages, state_values, returns, entropy, prob_ratio, model_loss, approx_kl = self.train(next_state_value, epoch)          
@@ -381,7 +372,7 @@ class PPO(tf.keras.Model):
         return next_obs
         
 
-    def evaluate(self, eval_env, n_tries=1, hyp= False):
+    def evaluate(self, eval_env, n_tries=1):
         rewards_history = []
         for _ in range(n_tries):
             obs = eval_env.reset()
@@ -394,15 +385,14 @@ class PPO(tf.keras.Model):
                     if not isinstance(actions, float) :
                         actions = actions[0,]
                 obs, reward, done, info = eval_env.step(actions)
-                reward = reward
-                total_reward += reward
-                #done = truncated or terminated  #terminated, truncated,
+
+                total_reward = total_reward+ reward
                 if done:
                     break
 
             rewards_history.append(total_reward)
-            eval_env.close()
 
+        eval_env.close()
         return rewards_history
 
     def evaluate_agent(self, epoch, sucess_criteria_epochs = 100):
@@ -510,7 +500,6 @@ class PPO(tf.keras.Model):
             obs = self.train_env.reset()
             #tracker = SummaryTracker()
             #tf.profiler.experimental.start(self.profiler_log_dir)
-     
 
             for epoch in range(self.training_steps):
                 #with tf.profiler.experimental.Trace('train', step_num=epoch, _r=1):
@@ -621,14 +610,14 @@ class MyHyperModel(kt.HyperModel):
                   gae_factor = None,
                   gae_min = 0.90, gae_max = 0.99,
                   lr_actor_crit_min = 0.00001, lr_actor_crit_max = 0.005,
-                  lr_model_min = None, lr_model_max = None,
+                  lr_model_min = None, lr_model_max = None, lr_model = None,
                   dense_min = 32, dense_max = 200,
                   environment_name="MountainCar-v0" , 
                   dense_layers = None,
                   num_layers_act = None, max_num_layers_act = 1, kl_divergence_target = None, num_layers_model = None, 
                   training_epoch =50, entropy_factor_max = 0.1, entropy_factor_min = 0.0001,
                   entropy_factor = None,
-                  memory_size = 50, training_epoch_max = None, memory_size_max = None, normalize_reward = False, normalize_advantage = False, 
+                  memory_size = 5, training_epoch_max = None, memory_size_max = None, normalize_advantage = False, 
                   scaling_factor_reward = None, use_mlflow = False,
                   reward_norm_factor  = 1, force_extreme_exploration = False):
         
@@ -648,7 +637,7 @@ class MyHyperModel(kt.HyperModel):
         self.lr_actor_crit_min = lr_actor_crit_min
         self.lr_actor_crit_max = lr_actor_crit_max
         
-       
+        self.lr_model = lr_model
         self.lr_model_min = lr_model_min
         self.lr_model_max = lr_model_max
         self.dense_layers = dense_layers
@@ -676,7 +665,6 @@ class MyHyperModel(kt.HyperModel):
         self.discount = discount
         
         self.policy_clip = policy_clip
-        self.normalize_rewards = normalize_reward
         self.normalize_advantages = normalize_advantage
         
         self.scaling_factor_reward = scaling_factor_reward
@@ -690,10 +678,10 @@ class MyHyperModel(kt.HyperModel):
         K.clear_session()
 
         if self.training_epoch_max != None:
-            self.training_epoch = hp.Int('training_epoch', 10, self.training_epoch_max, step = 10)
+            self.training_epoch = hp.Int('training_epoch', 1, self.training_epoch_max, step = 1)
             
         if self.memory_size_max != None:
-            self.memory_size = hp.Int('memory_size_max', 10, self.memory_size_max, step = 8)
+            self.memory_size = hp.Int('memory_size_max', 1, self.memory_size_max, step = 1)
         
         
         discount = self.discount
@@ -706,6 +694,8 @@ class MyHyperModel(kt.HyperModel):
             
         
         lr_actor_critic = hp.Float('lr_actor_critic', self.lr_actor_crit_min, self.lr_actor_crit_max)
+
+        lr_model = self.lr_model
         if self.lr_model_max is not None and self.num_layers_model is not None:
             lr_model = hp.Float('lr_model', self.lr_model_min, self.lr_model_max)
         
@@ -768,7 +758,6 @@ class MyHyperModel(kt.HyperModel):
             entropy_coeff = entropy_coeff,
             memory_size = self.memory_size,
             scaling_factor_reward = scaling_factor_reward,
-            normalize_reward = self.normalize_rewards,
             normalize_advantage = self.normalize_advantages, 
             kl_divergence_target = kl_divergence_target,
             use_mlflow = self.use_mlflow,
@@ -800,18 +789,39 @@ class MyHyperModel(kt.HyperModel):
         return best_epoch_loss
 
 
-def rerun_training(training_steps, model):
+def rerun_training(training_steps, save_factor = 50000,  model_path = './checkpoints/PPOgent', sucess_criteria_epochs =100, sucess_criteria_value = -100, return_agent = True,model = None):
     
-    model.training_steps = training_steps
-    last_epoch = model.train_agent()
+    obs = model.train_env.reset()
 
-    return model
+    for epoch in range(model.training_steps):
+
+            next_obs = model.run_agent(epoch, obs)
+            model.evaluate_agent(epoch)
+        
+
+            obs = next_obs
+
+            if epoch %save_factor == 0: 
+                model.actor_critic.save_weights(model_path+"_actor_critic")
+                model.env_model.save_weights(model_path+"_env_model")
+                
+
+            if epoch %  2000 == 0 and len(model.rewards_val_history)> 0 and len(model.rewards_train_history)> 0 and epoch >0:
+                print(f"Epoch: {epoch} : Reward eval/Train: {np.mean(model.rewards_val_history)}/{np.mean(model.rewards_train_history)} ")
+
+            if len(model.rewards_val_history)> model.sucess_criteria_epochs :
+                if np.mean(model.rewards_val_history[-model.sucess_criteria_epochs:]) >= self.sucess_criteria_value:
+                    print("Your agent reached the objetive")
+                    break
+
+    if return_agent:
+        return model
 
 def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units_model,num_layer_a_c,num_layer_m,
                   writer,  save_factor=50000, sucess_criteria_epochs =100, sucess_criteria_value = -100, 
                  environment_name="MountainCar-v0",  evaluation_epoch = 2000,return_agent = False,
                  lr_actor_critic= 0.001,  lr_model= 0.00001,  gae_lambda=0.95, training_epoch= 20, entropy_coeff= 0.01, 
-                 policy_clip = 0.2,memory_size= 50, id = 1, normalize_reward = False, normalize_advantage = False,  scaling_factor_reward = 0.1,
+                 policy_clip = 0.2,memory_size= 5, id = 1, normalize_advantage = False,  scaling_factor_reward = 0.1,
                  kl_divergence_target = 0.01, use_mlflow = False, reward_norm_factor = 1, force_extreme_exploration = False):
   
     model = PPO(
@@ -833,7 +843,6 @@ def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units
         training_epoch = training_epoch ,
         entropy_coeff = entropy_coeff,
         memory_size = memory_size,
-        normalize_reward = normalize_reward,
         normalize_advantage = normalize_advantage,
         scaling_factor_reward=scaling_factor_reward,
         kl_divergence_target = kl_divergence_target,
@@ -847,52 +856,50 @@ def run_training(training_steps,   discount,  dense_units_act_crit,  dense_units
     if return_agent:
         return model
 
+
 def final_evaluation(eval_model, eval_env, n_tries=1, exploration ="soft", video_name = "./PPO_soft_video.mp4", sucess_criteria_epochs= 100):
     rewards_history = []
-    log_dir = "Evaluation_process/A3C_"+str(exploration)+"/" +  datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = "Evaluation_process/PPO_"+str(exploration)+"/" +  datetime.now().strftime("%Y%m%d-%H%M%S")
     tb_summary_writer = tf.summary.create_file_writer(log_dir)
 
     for k in range(n_tries):
 
-        if k == 0 : video = VideoRecorder(eval_env, path=video_name)
+        if k == 0 : video = VideoRecorder(eval_model.train_env, path=video_name)
 
-        obs = eval_env.reset()
+        obs = eval_model.train_env.reset()
         total_reward = 0
-
-        log_dir_trial = "Evaluation_process/A3C_trial_"+str(exploration)+"/" + str(k)+ datetime.now().strftime("%Y%m%d-%H%M%S")
-        tb_summary_writer_trial = tf.summary.create_file_writer(log_dir_trial)
         
         epoch = 0
         while(True):
-    
+            
+
             if k == 0 : video.capture_frame()
+
             actions, _, _, _ ,_ = eval_model.actor_critic(obs.reshape((1,eval_model.obs_shape[0])))
             if eval_model.environment_name in ["BipedalWalker-v3", "Ant-v2"]:
                 if not isinstance(actions, float) :
                     actions = actions[0,]
 
-            obs, reward, done , info = eval_env.step(actions)
+            obs, reward, done , info = eval_model.train_env.step(actions)
             total_reward += reward
-            #done = truncated or terminated  #terminated, truncated 
-
-            with tb_summary_writer_trial.as_default():
-                tf.summary.scalar('Final_eval_rewards', total_reward, step=int(epoch) )
-                tf.summary.scalar('Final_eval_state', obs[0], step=int(epoch) )
-                tf.summary.scalar('Final_eval_velocity', obs[1], step=int(epoch) )
-                
+            
+            #print(f"Try :{k}, epoch :{epoch}, reward :{total_reward}, done :{done}")
             if done:
                 break
 
             epoch +=1
 
         rewards_history.append(total_reward)
+
         with tb_summary_writer.as_default():
             tf.summary.scalar('Rewards_history', total_reward, step=int(k) )
 
             if len(rewards_history) >sucess_criteria_epochs:
                 tf.summary.scalar('Average_rewards_history', np.mean(rewards_history[-sucess_criteria_epochs:]), step=int(k) )
 
-        eval_env.close()
-        if k == 0 : video.close()
+        eval_model.train_env.close()
 
+        if k == 0 : video.close()
+    print(rewards_history)
     return np.mean(rewards_history)
+
